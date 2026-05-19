@@ -1,6 +1,7 @@
 import sys
 
 from src.ingestion.pdf_loader import load_pdf
+from src.ocr.assembler import assemble
 from src.ocr.extractor import extract_pages
 
 if __name__ == "__main__":
@@ -10,5 +11,5 @@ if __name__ == "__main__":
 
     pages = load_pdf(sys.argv[1])
     regions = extract_pages(pages)
-    for r in regions:
-        print(r)
+    flat_text, region_index = assemble(regions)
+    print(flat_text)
