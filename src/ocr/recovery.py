@@ -1,4 +1,8 @@
-"""Claude vision recovery for low-confidence and critical OCR regions."""
+"""Vision recovery for low-confidence and critical OCR regions.
+
+Uses Qwen2.5-VL 32B on Fireworks — optimised for document understanding
+and visual grounding, available via the existing FIREWORKS_API_KEY.
+"""
 
 from __future__ import annotations
 
@@ -6,15 +10,28 @@ import base64
 import os
 from io import BytesIO
 
-import anthropic
+from openai import OpenAI
 from PIL import Image
 
-_MODEL = "claude-opus-4-5"
+_FIREWORKS_BASE_URL = "https://api.fireworks.ai/inference/v1"
+_MODEL = "accounts/fireworks/models/qwen2p5-vl-32b-instruct"
 _PROMPT = (
     'OCR guess: "{guess}"\n'
     "What does this image actually say? "
     'Reply with ONLY the corrected text, or exactly "ILLEGIBLE" if unreadable.'
 )
+
+_client: OpenAI | None = None
+
+
+def _get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        _client = OpenAI(
+            base_url=_FIREWORKS_BASE_URL,
+            api_key=os.environ["FIREWORKS_API_KEY"],
+        )
+    return _client
 
 
 def recover_regions(
@@ -22,12 +39,12 @@ def recover_regions(
     page_images: dict[int, Image.Image],
     recovery_key: str,
 ) -> dict[int, dict]:
-    """Send regions marked with recovery_key=True to Claude vision.
+    """Send regions marked with recovery_key=True to Qwen2.5-VL 32B for recovery.
 
     For each region:
     - Crops the bounding box from the original page image.
-    - Asks Claude to correct the OCR guess.
-    - If Claude returns "ILLEGIBLE", marks needs_review=True, recovered=False.
+    - Asks the model to correct the OCR guess.
+    - If the model returns "ILLEGIBLE", marks needs_review=True, recovered=False.
     - Otherwise, replaces text with the recovered value, recovered=True.
 
     Returns an updated copy of region_index.
@@ -36,19 +53,7 @@ def recover_regions(
     if not to_recover:
         return region_index
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        for idx in to_recover:
-            region_index[idx] = {
-                **region_index[idx],
-                "text": "ILLEGIBLE",
-                "recovered": False,
-                "needs_review": True,
-                "recovery_skipped": "ANTHROPIC_API_KEY not set",
-            }
-        return region_index
-
-    client = anthropic.Anthropic(api_key=api_key)
+    client = _get_client()
     result = dict(region_index)
 
     for idx, region in to_recover.items():
@@ -56,18 +61,16 @@ def recover_regions(
         image = page_images.get(page_num)
         crop_b64 = _crop_to_b64(region, image)
 
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=_MODEL,
             max_tokens=512,
             messages=[{
                 "role": "user",
                 "content": [
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": crop_b64,
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{crop_b64}",
                         },
                     },
                     {
@@ -78,7 +81,7 @@ def recover_regions(
             }],
         )
 
-        recovered_text = response.content[0].text.strip()
+        recovered_text = response.choices[0].message.content.strip()
         if recovered_text.upper() == "ILLEGIBLE":
             result[idx] = {
                 **region,
